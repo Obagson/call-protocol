@@ -74,62 +74,13 @@
   }
 )
 
-;; Private functions
 
-;; Calculate hash of lattice parameters to ensure uniqueness
-(define-private (hash-lattice-params
-  (seed uint)
-  (lattice-type (string-utf8 20))
-  (width uint)
-  (height uint)
-  (complexity uint)
-  (primary (string-utf8 20))
-  (secondary (string-utf8 20))
-  (background (string-utf8 20)))
-  ;; Hash each parameter individually, concatenate the resulting hash buffers pairwise, then hash the result
-  (sha256 
-    (concat (sha256 seed) ;; H1
-      (concat (sha256 (to-consensus-buff lattice-type)) ;; H2
-        (concat (sha256 width) ;; H3
-          (concat (sha256 height) ;; H4
-            (concat (sha256 complexity) ;; H5
-              (concat (sha256 (to-consensus-buff primary)) ;; H6
-                (concat (sha256 (to-consensus-buff secondary)) (sha256 (to-consensus-buff background))) ;; H7 + H8 -> B1
-              ) ;; H6 + B1 -> B2
-            ) ;; H5 + B2 -> B3
-          ) ;; H4 + B3 -> B4
-        ) ;; H3 + B4 -> B5
-      ) ;; H2 + B5 -> B6
-    ) ;; H1 + B6 -> Final Buffer to Hash
-  )
-)
 
 ;; Generate a new token ID
 (define-private (generate-new-token-id)
   (let ((new-id (+ (var-get last-token-id) u1)))
     (var-set last-token-id new-id)
     new-id
-  )
-)
-
-;; Validate lattice parameters
-(define-private (validate-lattice-params
-  (seed uint)
-  (lattice-type (string-utf8 20))
-  (width uint)
-  (height uint)
-  (complexity uint)
-  (primary (string-utf8 20))
-  (secondary (string-utf8 20))
-  (background (string-utf8 20)))
-  (and
-    (> width u0)
-    (> height u0)
-    (> complexity u0)
-    (not (is-eq lattice-type ""))
-    (not (is-eq primary ""))
-    (not (is-eq secondary ""))
-    (not (is-eq background ""))
   )
 )
 
@@ -153,61 +104,6 @@
 
 ;; Public functions
 
-;; Mint a new lattice NFT
-(define-public (mint-lattice
-  (seed uint)
-  (lattice-type (string-utf8 20))
-  (width uint)
-  (height uint)
-  (complexity uint)
-  (primary (string-utf8 20))
-  (secondary (string-utf8 20))
-  (background (string-utf8 20))
-  (metadata-uri (string-ascii 256)))
-  (let
-    (
-      (params-hash (hash-lattice-params seed lattice-type width height complexity primary secondary background))
-      (is-valid (validate-lattice-params seed lattice-type width height complexity primary secondary background))
-      (caller tx-sender)
-    )
-    (asserts! is-valid ERR-INVALID-PARAMETERS)
-    
-    ;; Check for duplicates
-    (asserts! (is-none (map-get? pattern-hashes params-hash)) ERR-DUPLICATE-PATTERN)
-    
-    ;; Check payment
-    (asserts! (is-ok (stx-transfer? (var-get mint-price) caller (var-get contract-owner))) ERR-INSUFFICIENT-FUNDS)
-    
-    ;; Generate new token
-    (let ((token-id (generate-new-token-id)))
-      ;; Save parameters
-      (map-set lattice-parameters token-id {
-        seed: seed,
-        lattice-type: lattice-type,
-        dimensions: {
-          width: width,
-          height: height
-        },
-        complexity: complexity,
-        color-scheme: {
-          primary: primary,
-          secondary: secondary,
-          background: background
-        },
-        metadata-uri: metadata-uri
-      })
-      
-      ;; Set ownership and creator
-      (map-set token-owners token-id caller)
-      (map-set token-creators token-id caller)
-      
-      ;; Record pattern hash to prevent duplicates
-      (map-set pattern-hashes params-hash token-id)
-      
-      (ok token-id)
-    )
-  )
-)
 
 ;; Transfer ownership of an NFT
 (define-public (transfer (token-id uint) (sender principal) (recipient principal))
@@ -222,76 +118,6 @@
     ;; Update ownership
     (map-set token-owners token-id recipient)
     (ok true)
-  )
-)
-
-;; List an NFT for sale
-(define-public (list-for-sale (token-id uint) (price uint) (expiry uint))
-  (let ((caller tx-sender))
-    (asserts! (is-owner token-id caller) ERR-NOT-OWNER)
-    (asserts! (> price u0) ERR-INVALID-PRICE)
-    (asserts! (> expiry block-height) ERR-LISTING-EXPIRED)
-    
-    (map-set token-listings token-id {
-      price: price,
-      seller: caller,
-      expiry: expiry
-    })
-    
-    (ok true)
-  )
-)
-
-;; Cancel a listing
-(define-public (cancel-listing (token-id uint))
-  (let ((caller tx-sender))
-    (match (map-get? token-listings token-id)
-      listing
-        (begin
-          (asserts! (is-eq (get seller listing) caller) ERR-NOT-AUTHORIZED)
-          (map-delete token-listings token-id)
-          (ok true)
-        )
-      (err ERR-NOT-LISTED)
-    )
-  )
-)
-
-;; Purchase a listed NFT
-(define-public (purchase (token-id uint))
-  (let
-    (
-      (buyer tx-sender)
-    )
-    (match (map-get? token-listings token-id)
-      listing
-        (let
-          (
-            (seller (get seller listing))
-            (price (get price listing))
-            (expiry (get expiry listing))
-            (creator (unwrap! (map-get? token-creators token-id) ERR-NFT-NOT-FOUND))
-            (royalty-amount (calculate-royalty price))
-            (seller-amount (- price royalty-amount))
-          )
-          (asserts! (<= block-height expiry) ERR-LISTING-EXPIRED)
-          
-          ;; Transfer funds to creator (royalty)
-          (asserts! (is-ok (stx-transfer? royalty-amount buyer creator)) ERR-TRANSFER-FAILED)
-          
-          ;; Transfer funds to seller
-          (asserts! (is-ok (stx-transfer? seller-amount buyer seller)) ERR-TRANSFER-FAILED)
-          
-          ;; Transfer NFT to buyer
-          (map-set token-owners token-id buyer)
-          
-          ;; Remove listing
-          (map-delete token-listings token-id)
-          
-          (ok true)
-        )
-      (err ERR-NOT-LISTED)
-    )
   )
 )
 
@@ -331,33 +157,6 @@
   (match (map-get? lattice-parameters token-id)
     params (ok params)
     (err ERR-NFT-NOT-FOUND)
-  )
-)
-
-;; Check if a listing exists and is valid
-(define-read-only (get-listing (token-id uint))
-  (match (map-get? token-listings token-id)
-    listing
-      (if (<= block-height (get expiry listing))
-        (ok listing)
-        (err ERR-LISTING-EXPIRED)
-      )
-    (err ERR-NOT-LISTED)
-  )
-)
-
-;; Check if a pattern already exists
-(define-read-only (pattern-exists 
-  (seed uint)
-  (lattice-type (string-utf8 20))
-  (width uint)
-  (height uint)
-  (complexity uint)
-  (primary (string-utf8 20))
-  (secondary (string-utf8 20))
-  (background (string-utf8 20)))
-  (let ((params-hash (hash-lattice-params seed lattice-type width height complexity primary secondary background)))
-    (is-some (map-get? pattern-hashes params-hash))
   )
 )
 
